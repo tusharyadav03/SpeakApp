@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -9,7 +10,8 @@ const fs = require('fs');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-const JWT_SECRET = process.env.JWT_SECRET || 'speakapp-secret-2024';
+const JWT_SECRET = process.env.JWT_SECRET || '292dbe5a65bfc136b1304ade415f8e79034e8a0872bc4f32c0fa0547564147b1bc90993151359a236d16d8bf2cd3d7a1ae8965ac0d49a41386811c91321bebbb';
+if (!process.env.JWT_SECRET) console.warn('⚠️  JWT_SECRET not set in env — using built-in fallback. Set JWT_SECRET in production!');
 // Try 'dist_out' first (new), then 'dist' (legacy) for backwards compat
 const CLIENT_DIST = fs.existsSync(path.join(__dirname, 'client', 'dist_out'))
   ? path.join(__dirname, 'client', 'dist_out')
@@ -18,6 +20,7 @@ const ROOM_STALE_MS = 2 * 60 * 60 * 1000; // 2h — auto-cleanup stale rooms
 
 // ─── Database (in-memory) ────────────────────────────────────────────────────
 const users = new Map();
+let userIdCounter = 0; // monotonic ID — never reuse
 const events = [];
 const rooms = new Map();
 // socketId → { roomId, role, userId (for attendees) } — fast lookup on disconnect/reconnect
@@ -241,7 +244,7 @@ const SAFELIST = new Set([
   'arsenal','semen','semester','seminar','penthouse','penalty','penetrate',
   'cumulative','accumulate','cucumber','document','circumstance',
   'happiness','happiest','therapist',
-  'bigger','digger','trigger','snigger','nigger', // keep the safe versions
+  'bigger','digger','trigger','snigger', // keep the safe compound-suffix versions
   'putter','butter','gutter','cutter','mutter','nutter','stutter','sputter','clutter','flutter','shutter','utter',
   'hooker', // surname
   'con','concern','concept','conclude','conclusion','concrete','consent','consider','consist','constant',
@@ -329,8 +332,9 @@ function filterProfanity(text) {
 
 async function seedAdmin() {
   const hash = await bcrypt.hash('admin123', 10);
+  const adminId = ++userIdCounter;
   users.set('admin@speakapp.io', {
-    id: 1, email: 'admin@speakapp.io', password_hash: hash,
+    id: adminId, email: 'admin@speakapp.io', password_hash: hash,
     name: 'Admin', role: 'superadmin'
   });
   console.log('✅ Admin ready: admin@speakapp.io / admin123');
@@ -351,7 +355,7 @@ function roomJSON(r) {
   return {
     id: r.id, name: r.name, hostName: r.hostName, status: r.status,
     queue: r.queue.map(q => ({ id: q.id, name: q.name, question: q.question || '', linkedin: q.linkedin || '' })),
-    currentSpeaker: r.currentSpeaker ? { id: r.currentSpeaker.id, name: r.currentSpeaker.name, linkedin: r.currentSpeaker.linkedin || '' } : null,
+    currentSpeaker: r.currentSpeaker ? { id: r.currentSpeaker.id, name: r.currentSpeaker.name, question: r.currentSpeaker.question || '', linkedin: r.currentSpeaker.linkedin || '' } : null,
     attendeeCount: r.attendees.size,
     transcript: r.transcript.slice(-50)
   };
@@ -525,7 +529,7 @@ app.post('/api/auth/register', async (req, res) => {
     if (users.has(key)) return res.status(409).json({ error: 'Email already registered' });
 
     const hash = await bcrypt.hash(password, 10);
-    const user = { id: users.size + 1, email: key, password_hash: hash, name: name.trim(), role: 'user' };
+    const user = { id: ++userIdCounter, email: key, password_hash: hash, name: name.trim(), role: 'user' };
     users.set(key, user);
 
     const token = jwt.sign({ userId: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -777,14 +781,17 @@ io.on('connection', (socket) => {
   });
 
   socket.on('webrtc_ice', ({ candidate, to, roomId }) => {
-    if (!to || !candidate) return;
-    // Only relay if both sockets are in the same room
+    if (!candidate) return;
     const room = getRoom(roomId);
     if (!room) return;
     const senderInRoom = socket.id === room.hostSocketId || room.attendees.has(socket.id);
-    const targetInRoom = to === room.hostSocketId || room.attendees.has(to);
-    if (senderInRoom && targetInRoom) {
-      io.to(to).emit('webrtc_ice', { from: socket.id, candidate });
+    if (!senderInRoom) return;
+    // If attendee sends with to=null, route to host automatically
+    const target = to || (socket.id !== room.hostSocketId ? room.hostSocketId : null);
+    if (!target) return;
+    const targetInRoom = target === room.hostSocketId || room.attendees.has(target);
+    if (targetInRoom) {
+      io.to(target).emit('webrtc_ice', { from: socket.id, candidate });
     }
   });
 
