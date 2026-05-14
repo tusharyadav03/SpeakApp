@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1080" width="1080" height="1080">
+  <defs>
+    <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#B08FD8"/>
+      <stop offset="50%" stop-color="#5B8DEF"/>
+      <stop offset="100%" stop-color="#2DD4D4"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1080" rx="0" fill="#1A1A2E"/>
+  <rect x="328" y="470" width="36" height="180" rx="18" fill="url(#barGrad)" opacity="0.7"/>
+  <rect x="382" y="390" width="36" height="340" rx="18" fill="url(#barGrad)" opacity="0.8"/>
+  <rect x="436" y="340" width="40" height="440" rx="20" fill="url(#barGrad)" opacity="0.85"/>
+  <rect x="494" y="300" width="44" height="500" rx="22" fill="url(#barGrad)" opacity="0.95"/>
+  <rect x="556" y="320" width="44" height="460" rx="22" fill="url(#barGrad)" opacity="0.9"/>
+  <rect x="618" y="360" width="40" height="380" rx="20" fill="url(#barGrad)" opacity="0.85"/>
+  <rect x="676" y="420" width="36" height="260" rx="18" fill="url(#barGrad)" opacity="0.75"/>
+</svg>

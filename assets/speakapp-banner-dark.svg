@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2100 900" width="2100" height="900">
+  <defs>
+    <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#B08FD8"/>
+      <stop offset="50%" stop-color="#5B8DEF"/>
+      <stop offset="100%" stop-color="#2DD4D4"/>
+    </linearGradient>
+    <linearGradient id="textGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#5BA8EF"/>
+      <stop offset="100%" stop-color="#3DE8E8"/>
+    </linearGradient>
+  </defs>
+  <rect width="2100" height="900" fill="#1A1A2E"/>
+  <g transform="translate(380, 280) scale(0.75)">
+    <rect x="0" y="140" width="28" height="140" rx="14" fill="url(#barGrad)" opacity="0.7"/>
+    <rect x="42" y="80" width="28" height="260" rx="14" fill="url(#barGrad)" opacity="0.8"/>
+    <rect x="84" y="40" width="32" height="340" rx="16" fill="url(#barGrad)" opacity="0.85"/>
+    <rect x="130" y="10" width="34" height="400" rx="17" fill="url(#barGrad)" opacity="0.95"/>
+    <rect x="178" y="25" width="34" height="370" rx="17" fill="url(#barGrad)" opacity="0.9"/>
+    <rect x="226" y="55" width="32" height="310" rx="16" fill="url(#barGrad)" opacity="0.85"/>
+    <rect x="272" y="100" width="28" height="220" rx="14" fill="url(#barGrad)" opacity="0.75"/>
+  </g>
+  <text x="830" y="510" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="140" fill="url(#textGrad)" letter-spacing="2">speakapp</text>
+</svg>

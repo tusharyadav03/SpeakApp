@@ -2,16 +2,15 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Wifi, WifiOff, Copy, Check } from "lucide-react";
 
 /* ─────────────────────────────────────────────────────────────
-   Logo  —  warm paper/ink look (prototype v2)
+   Logo  —  SpeakApp waveform mark + wordmark
    ───────────────────────────────────────────────────────────── */
 export const Logo = ({ sm }) => (
   <div className="flex items-center gap-2.5 select-none">
-    <div
-      className={`${sm ? "w-8 h-8 text-sm" : "w-9 h-9 text-base"} rounded-xl flex items-center justify-center font-bold text-white shadow-sm`}
-      style={{ background: "var(--ink)" }}
-    >
-      S
-    </div>
+    <img
+      src="/logo.svg"
+      alt="SpeakApp"
+      className={`${sm ? "w-8 h-8" : "w-9 h-9"}`}
+    />
     <span
       className={`${sm ? "text-lg" : "text-xl"} tracking-tight font-extrabold`}
       style={{ fontFamily: "var(--font-display)", color: "var(--ink)" }}
