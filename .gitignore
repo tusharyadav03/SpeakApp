@@ -38,3 +38,4 @@ coverage/
 .cache/
 .parcel-cache/
 .eslintcache
+.claude/
