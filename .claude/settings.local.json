@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"/Volumes/Tushar/New Speak App\" && rm -rf node_modules client/node_modules build dist client/build client/dist client/dist_out .DS_Store client/.DS_Store client/._node_modules && rm -f client/vite.config.js.timestamp-*.mjs && ls -la && echo \"---client---\" && ls -la client)"
+    ],
+    "additionalDirectories": [
+      "/Volumes/Tushar/New Speak App/client"
+    ]
+  }
+}

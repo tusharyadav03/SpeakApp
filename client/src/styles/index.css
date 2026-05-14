@@ -1,0 +1,107 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─────────────────────────────────────────────────────────────
+   SpeakApp v7 — design tokens (from "SpeakApp Prototype.html")
+   ───────────────────────────────────────────────────────────── */
+:root {
+  /* Surface */
+  --ink: #0b0c10;
+  --paper: #ffffff;
+  --muted: #6b6a66;
+  --line: #e7e5df;
+  --soft: #f5f3ee;
+
+  /* Live / accent */
+  --live: oklch(0.72 0.19 150);
+  --accent: oklch(0.7 0.18 252);
+  --accent-soft: oklch(0.97 0.04 252);
+
+  /* Geometry */
+  --r: 14px;
+  --gap: 12px;
+  --pad: 14px;
+
+  /* Typography */
+  --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --font-body: 'DM Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Legacy aliases — keep old pages (Landing/Login/etc.) working */
+  --brand-50:  #eff6ff;
+  --brand-100: #dbeafe;
+  --brand-200: #bfdbfe;
+  --brand-400: #60a5fa;
+  --brand-500: #3b82f6;
+  --brand-600: #2563eb;
+  --brand-700: #1d4ed8;
+  --danger:    #ef4444;
+  --warning:   #f59e0b;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; min-height: 100vh; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--soft);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+#root { min-height: 100vh; }
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.mono { font-family: var(--font-mono); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d6d3cc; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #999791; }
+
+::selection { background: var(--accent-soft); color: var(--ink); }
+
+*:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ─────────────── Animations ─────────────── */
+@keyframes floatUp {
+  0%   { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-400px) scale(0.5); }
+}
+.float-up { animation: floatUp 3.2s ease-out forwards; }
+
+@keyframes liveRing {
+  0%   { box-shadow: 0 0 0 0 rgba(255,255,255,.45); }
+  70%  { box-shadow: 0 0 0 24px rgba(255,255,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+}
+.live-ring { animation: liveRing 2s infinite; }
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-slide-up { animation: slideUp 0.4s ease-out; }
+
+@keyframes tickerScroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.ticker-track { animation: tickerScroll 40s linear infinite; white-space: nowrap; display: inline-flex; }
+
+.line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+.stage-grain {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.9'/></svg>");
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-ring, .float-up, .ticker-track, .animate-slide-up { animation: none !important; }
+}
