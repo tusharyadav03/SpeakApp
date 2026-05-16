@@ -560,6 +560,44 @@ app.get('/api/admin/stats', (req, res) => {
   res.json({ totalUsers: users.size, totalEvents: events.length, activeEvents: rooms.size });
 });
 
+// ─── Session Network Isolation ──────────────────────────────────────────────
+// Mini Militia model: each room = isolated network. Host = gateway node.
+// All audio/signaling scoped strictly to room. No cross-room leakage.
+//
+// Topology per room:
+//   [Attendee 1] ──┐
+//   [Attendee 2] ──┤── Socket.IO Room ── [Host] ── [Presenter]
+//   [Attendee N] ──┘
+//
+// Rules:
+// 1. Every event validates roomId + sender membership
+// 2. Audio frames ONLY from currentSpeaker → host (never broadcast)
+// 3. WebRTC signals are point-to-point within room
+// 4. Attendees CANNOT send to other attendees
+// 5. Socket can only be in ONE room at a time
+
+function validateRoomMember(socket, roomId) {
+  const room = getRoom(roomId);
+  if (!room) return null;
+  const isHost = socket.id === room.hostSocketId;
+  const isAttendee = room.attendees.has(socket.id);
+  const isPresenter = socket.isPresenter && socket.roomId === room.id;
+  if (!isHost && !isAttendee && !isPresenter) return null;
+  return room;
+}
+
+function validateHost(socket, roomId) {
+  const room = getRoom(roomId);
+  if (!room || socket.id !== room.hostSocketId) return null;
+  return room;
+}
+
+function validateSpeaker(socket, roomId) {
+  const room = getRoom(roomId);
+  if (!room || !room.currentSpeaker || room.currentSpeaker.id !== socket.id) return null;
+  return room;
+}
+
 // ─── Socket.IO handlers ─────────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log(`🔌 +${socket.id.slice(0, 8)}`);
@@ -602,6 +640,22 @@ io.on('connection', (socket) => {
     if (!room) return socket.emit('error', 'Room not found. Check the code.');
     if (room.status === 'ended') return socket.emit('error', 'This event has ended');
 
+    // ── Network isolation: leave any previous room first ──
+    // One socket = one room. Prevents cross-room audio leakage.
+    if (socket.roomId && socket.roomId !== room.id) {
+      const oldRoom = getRoom(socket.roomId);
+      if (oldRoom) {
+        oldRoom.attendees.delete(socket.id);
+        oldRoom.queue = oldRoom.queue.filter(q => q.id !== socket.id);
+        if (oldRoom.currentSpeaker?.id === socket.id) {
+          oldRoom.currentSpeaker = null;
+          oldRoom.speakerSRActive = false;
+        }
+        socket.leave(socket.roomId);
+        io.to(socket.roomId).emit('room_data', roomJSON(oldRoom));
+      }
+    }
+
     const userName = user?.name || 'Guest';
     const userLinkedin = user?.linkedin || '';
     room.attendees.set(socket.id, { id: socket.id, name: userName, linkedin: userLinkedin });
@@ -612,7 +666,7 @@ io.on('connection', (socket) => {
 
     socket.emit('room_data', roomJSON(room));
     io.to(room.hostSocketId).emit('attendee_joined', { name: userName, count: room.attendees.size });
-    console.log(`👤 ${userName} → ${room.id}`);
+    console.log(`👤 ${userName} → ${room.id} (isolated session)`);
   });
 
   // Host reconnection — re-claim host seat if socket changed
@@ -758,60 +812,64 @@ io.on('connection', (socket) => {
     if (roomId && emoji) io.to(roomId.toUpperCase()).emit('reaction_received', emoji);
   });
 
-  // ─── WebRTC signaling (room-isolated P2P) ──────────────────
-  // Offers always go attendee → host. Answers always go host → attendee.
-  // ICE candidates are routed via explicit `to` field — never broadcast.
+  // ─── WebRTC signaling (room-isolated P2P, strict validation) ─────────
+  // Network isolation rules:
+  // - Offers: ONLY attendee → host (never attendee → attendee)
+  // - Answers: ONLY host → specific attendee
+  // - ICE: point-to-point within room, verified membership
+  // - Audio frames: ONLY currentSpeaker → host
   socket.on('webrtc_offer', ({ roomId, offer }) => {
-    const room = getRoom(roomId);
-    if (!room) return console.warn(`⚠️ WebRTC offer for unknown room: ${roomId}`);
-    // Verify sender is in this room
-    if (!room.attendees.has(socket.id) && socket.id !== room.hostSocketId) return;
+    const room = validateRoomMember(socket, roomId);
+    if (!room) return console.warn(`⚠️ WebRTC offer rejected: ${socket.id.slice(0,6)} not in ${roomId}`);
+    // Only attendees send offers (to host)
+    if (socket.id === room.hostSocketId) return; // host doesn't send offers
     console.log(`📡 Offer: ${socket.id.slice(0,6)} → host [${roomId}]`);
     io.to(room.hostSocketId).emit('webrtc_offer', { from: socket.id, offer, roomId: room.id });
   });
 
   socket.on('webrtc_answer', ({ to, answer, roomId }) => {
     if (!to) return;
-    // Verify both parties are in the same room
-    const room = getRoom(roomId);
-    if (room && socket.id === room.hostSocketId) {
-      console.log(`📡 Answer: host → ${to.slice(0,6)} [${roomId}]`);
-      io.to(to).emit('webrtc_answer', { from: socket.id, answer });
-    }
+    const room = validateHost(socket, roomId);
+    if (!room) return; // only host sends answers
+    // Verify target is in this room
+    if (!room.attendees.has(to)) return;
+    console.log(`📡 Answer: host → ${to.slice(0,6)} [${roomId}]`);
+    io.to(to).emit('webrtc_answer', { from: socket.id, answer });
   });
 
   socket.on('webrtc_ice', ({ candidate, to, roomId }) => {
     if (!candidate) return;
-    const room = getRoom(roomId);
+    const room = validateRoomMember(socket, roomId);
     if (!room) return;
-    const senderInRoom = socket.id === room.hostSocketId || room.attendees.has(socket.id);
-    if (!senderInRoom) return;
-    // If attendee sends with to=null, route to host automatically
-    const target = to || (socket.id !== room.hostSocketId ? room.hostSocketId : null);
+    // Route: attendee→host or host→specific attendee (NEVER attendee→attendee)
+    const isHost = socket.id === room.hostSocketId;
+    const target = isHost ? to : room.hostSocketId; // attendees always send to host
     if (!target) return;
+    // Verify target is in room
     const targetInRoom = target === room.hostSocketId || room.attendees.has(target);
     if (targetInRoom) {
       io.to(target).emit('webrtc_ice', { from: socket.id, candidate });
     }
   });
 
-  // ─── WebSocket audio fallback (relay PCM frames attendee → host) ─────
+  // ─── WebSocket audio fallback (strict: ONLY currentSpeaker → host) ──
   socket.on('audio_mode', ({ roomId, mode }) => {
-    const room = getRoom(roomId);
+    const room = validateRoomMember(socket, roomId);
     if (!room) return;
-    if (room.currentSpeaker?.id === socket.id || room.attendees.has(socket.id)) {
+    // Only current speaker or granted attendee can set audio mode
+    if (room.currentSpeaker?.id === socket.id) {
       io.to(room.hostSocketId).emit('audio_mode', { mode, from: socket.id });
       console.log(`📡 Audio mode: ${mode} for speaker in ${roomId}`);
     }
   });
 
   socket.on('audio_frame', ({ roomId, data }) => {
-    const room = getRoom(roomId);
+    // Strict: only current speaker's frames reach host. All others dropped.
+    const room = validateSpeaker(socket, roomId);
     if (!room) return;
-    // Only relay from current speaker → host
-    if (room.currentSpeaker?.id === socket.id) {
-      io.to(room.hostSocketId).emit('audio_frame', { data });
-    }
+    // Point-to-point: speaker → host ONLY (never broadcast to room)
+    io.to(room.hostSocketId).volatile.emit('audio_frame', { data });
+    // .volatile = drop if host can't keep up (prevents buffer bloat)
   });
 
   // WebRTC renegotiation — attendee requests new offer/answer cycle
@@ -847,16 +905,18 @@ io.on('connection', (socket) => {
 
   // Speech-to-text from speaker's phone or host
   socket.on('transcript_send', ({ roomId, text, speaker }) => {
-    const room = getRoom(roomId);
+    const room = validateRoomMember(socket, roomId);
     if (!room || !text) return;
 
-    // KEY FIX: If guest is self-transcribing, ignore host's mic transcripts
-    // Guest's phone mic = clean source; host mic = degraded room audio
+    // ECHO PREVENTION: Only accept transcripts from authorized sources
     const isHost = socket.id === room.hostSocketId;
-    if (isHost && room.speakerSRActive && room.currentSpeaker) {
-      // Host mic transcript ignored — guest is sending clean transcripts
-      return;
-    }
+    const isSpeaker = room.currentSpeaker?.id === socket.id;
+
+    // Rule 1: If guest is self-transcribing, reject host mic transcripts (echo)
+    if (isHost && room.speakerSRActive && room.currentSpeaker) return;
+
+    // Rule 2: Non-host, non-speaker attendees cannot send transcripts
+    if (!isHost && !isSpeaker) return;
 
     // Filter profanity
     const { text: cleanText, beeped } = filterProfanity(text);
