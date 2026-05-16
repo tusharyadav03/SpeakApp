@@ -380,7 +380,7 @@ const io = new Server(server, {
   transports: ['websocket', 'polling'],
   pingTimeout: 30000,
   pingInterval: 15000,
-  maxHttpBufferSize: 1e6, // 1MB max message
+  maxHttpBufferSize: 5e6, // 5MB max message (needed for audio frame fallback)
   connectionStateRecovery: {
     maxDisconnectionDuration: 2 * 60 * 1000, // 2 min recovery window
     skipMiddlewares: true,
@@ -792,6 +792,25 @@ io.on('connection', (socket) => {
     const targetInRoom = target === room.hostSocketId || room.attendees.has(target);
     if (targetInRoom) {
       io.to(target).emit('webrtc_ice', { from: socket.id, candidate });
+    }
+  });
+
+  // ─── WebSocket audio fallback (relay PCM frames attendee → host) ─────
+  socket.on('audio_mode', ({ roomId, mode }) => {
+    const room = getRoom(roomId);
+    if (!room) return;
+    if (room.currentSpeaker?.id === socket.id || room.attendees.has(socket.id)) {
+      io.to(room.hostSocketId).emit('audio_mode', { mode, from: socket.id });
+      console.log(`📡 Audio mode: ${mode} for speaker in ${roomId}`);
+    }
+  });
+
+  socket.on('audio_frame', ({ roomId, data }) => {
+    const room = getRoom(roomId);
+    if (!room) return;
+    // Only relay from current speaker → host
+    if (room.currentSpeaker?.id === socket.id) {
+      io.to(room.hostSocketId).emit('audio_frame', { data });
     }
   });
 
