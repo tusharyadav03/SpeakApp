@@ -31,13 +31,49 @@ const LOADING_MESSAGES = {
 // Detect presenter mode from URL — takes over the whole app
 const PRESENTER_ROOM = new URLSearchParams(window.location.search).get("presenter");
 
-function Routes({ view, room, attUser, ok, nav, home, create, join }) {
+function WaitingRoom({ data, onCancel }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: "var(--soft)" }}>
+      <div className="max-w-sm w-full text-center animate-slide-up">
+        <div className="w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-5"
+          style={{ background: "color-mix(in oklab, var(--accent) 14%, white)" }}>
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </div>
+        <h2 className="text-2xl font-extrabold mb-2" style={{ fontFamily: "var(--font-display)", color: "var(--ink)" }}>
+          Waiting for approval
+        </h2>
+        <p className="text-sm mb-1" style={{ color: "var(--muted)" }}>
+          Requesting to join <strong style={{ color: "var(--ink)" }}>{data?.roomName || "event"}</strong>
+        </p>
+        <p className="text-sm mb-6" style={{ color: "var(--muted)" }}>
+          The host will accept your request shortly
+        </p>
+        <div className="flex justify-center mb-4">
+          <div className="flex gap-1.5">
+            {[0, 1, 2].map(i => (
+              <div key={i} className="w-2.5 h-2.5 rounded-full animate-pulse"
+                style={{ background: "var(--accent)", animationDelay: `${i * 0.3}s` }} />
+            ))}
+          </div>
+        </div>
+        <button onClick={onCancel} className="text-sm font-semibold" style={{ color: "var(--muted)" }}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Routes({ view, room, attUser, ok, nav, home, create, join, waitingRoom }) {
   const { user } = useAuth();
   switch (view) {
     case "landing": return <Landing ok={ok} nav={nav} />;
     case "host": return <HostSetup onBack={home} onCreate={create} ok={ok} />;
     case "dash": return room ? <HostDash room={room} onEnd={home} /> : <Landing ok={ok} nav={nav} />;
     case "join": return <JoinPage onBack={home} onJoin={join} ok={ok} />;
+    case "waiting": return <WaitingRoom data={waitingRoom} onCancel={home} />;
     case "att": return room ? <Attendee room={room} user={attUser} onExit={home} /> : <Landing ok={ok} nav={nav} />;
     case "login": return <Login onBack={home} onSwitch={() => nav("register")} />;
     case "register": return <Register onBack={home} onSwitch={() => nav("login")} />;
@@ -53,6 +89,7 @@ export default function App() {
   const [ok, setOk] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
+  const [waitingRoom, setWaitingRoom] = useState(null); // { roomId, roomName, hostName }
   const sk = useRef(null);
 
   // Navigate with a brief loading transition
@@ -100,12 +137,34 @@ export default function App() {
       else console.error("Socket error:", m);
     };
 
+    // ── Waiting room flow ──
+    const onJoinPending = (data) => {
+      setWaitingRoom(data);
+      setLoading(false);
+      setView("waiting");
+    };
+    const onJoinApproved = (roomData) => {
+      setWaitingRoom(null);
+      setRoom(roomData);
+      setLoadingMsg("Joining event...");
+      setLoading(true);
+      setTimeout(() => { setView("att"); setLoading(false); }, 400);
+    };
+    const onJoinRejected = ({ reason }) => {
+      setWaitingRoom(null);
+      alert(reason || "Your join request was declined.");
+      setView("join");
+    };
+
     s.on("connect", onConnect);
     s.on("disconnect", onDisconnect);
     s.on("event_created", onEventCreated);
     s.on("room_data", onRoomData);
     s.on("event_ended", onEventEnded);
     s.on("error", onError);
+    s.on("join_pending", onJoinPending);
+    s.on("join_approved", onJoinApproved);
+    s.on("join_rejected", onJoinRejected);
 
     setOk(s.connected);
     if (new URLSearchParams(window.location.search).get("room")) setView("join");
@@ -117,6 +176,9 @@ export default function App() {
       s.off("room_data", onRoomData);
       s.off("event_ended", onEventEnded);
       s.off("error", onError);
+      s.off("join_pending", onJoinPending);
+      s.off("join_approved", onJoinApproved);
+      s.off("join_rejected", onJoinRejected);
     };
   }, []);
 
@@ -125,9 +187,9 @@ export default function App() {
     if (!ok) return alert("Connecting...");
     setAttUser(u);
     sk.current.emit("join_room_attendee", { roomId: code.toUpperCase(), user: u });
-    setLoadingMsg("Joining event...");
+    setLoadingMsg("Requesting to join...");
     setLoading(true);
-    setTimeout(() => { setView("att"); setLoading(false); }, 400);
+    // Server will respond with join_pending → waiting room, or join_approved → att view
   };
 
   // Presenter mode short-circuits everything — it's a display-only view
@@ -143,7 +205,7 @@ export default function App() {
     <AuthProvider>
       {loading
         ? <LoadingPage message={loadingMsg} />
-        : <Routes view={view} room={room} attUser={attUser} ok={ok} nav={nav} home={home} create={create} join={join} />
+        : <Routes view={view} room={room} attUser={attUser} ok={ok} nav={nav} home={home} create={create} join={join} waitingRoom={waitingRoom} />
       }
     </AuthProvider>
   );

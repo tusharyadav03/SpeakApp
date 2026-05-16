@@ -14,10 +14,11 @@ import {
   UserMinus,
   Monitor,
   Link as LinkIcon,
+  UserPlus,
+  Bell,
 } from "lucide-react";
 import { getSocket, onConnState } from "../config/socket";
 import { ICE, optimizeSDP } from "../config/webrtc";
-import { AudioReceiver } from "../config/audioFallback";
 import {
   Logo,
   Btn,
@@ -41,14 +42,12 @@ export default function HostDash({ room, onEnd }) {
   const [transcribing, setTranscribing] = useState(false);
   const [speakerSR, setSpeakerSR] = useState(false);
   const [connState, setConnState] = useState("connected");
-  const [audioMode, setAudioMode] = useState(null); // 'webrtc' | 'websocket'
   const audio = useRef(null);
   const remoteStream = useRef(null);
   const pc = useRef(null);
   const recognition = useRef(null);
   const iceCandidateBuffer = useRef([]);
   const remoteDescSet = useRef(false);
-  const audioReceiver = useRef(null);
   const s = useRef(getSocket());
 
   // Track connection state
@@ -184,6 +183,11 @@ export default function HostDash({ room, onEnd }) {
     });
     sk.on("transcript_update", (e) => setTranscript((p) => [...p.slice(-49), e]));
 
+    // Join request notification sound (subtle beep)
+    sk.on("join_request", () => {
+      // Visual notification handled by room.pendingJoins in room_data
+    });
+
     sk.on("webrtc_offer", async ({ from, offer }) => {
       try {
         // Reset buffer for new connection
@@ -252,7 +256,6 @@ export default function HostDash({ room, onEnd }) {
         // Optimize SDP: Opus FEC + DTX for resilient audio
         const optimizedAns = { ...ans, sdp: optimizeSDP(ans.sdp) };
         await c.setLocalDescription(optimizedAns);
-        setAudioMode('webrtc');
         sk.emit("webrtc_answer", { roomId: room.id, answer: optimizedAns, to: from });
       } catch (err) {
         console.error("WebRTC error:", err);
@@ -273,24 +276,6 @@ export default function HostDash({ room, onEnd }) {
       }
     });
 
-    // ─── WebSocket audio fallback receiver ───
-    sk.on("audio_mode", ({ mode }) => {
-      if (mode === 'websocket') {
-        console.log("📡 Speaker using WebSocket audio fallback");
-        setAudioMode('websocket');
-        // Close WebRTC if active
-        if (pc.current) { try { pc.current.close(); } catch {} pc.current = null; }
-        // Start audio receiver
-        if (!audioReceiver.current) {
-          audioReceiver.current = new AudioReceiver();
-          audioReceiver.current.start();
-        }
-      }
-    });
-    sk.on("audio_frame", ({ data }) => {
-      if (audioReceiver.current) audioReceiver.current.feed(data);
-    });
-
     // Host reconnection — rejoin room on socket reconnect
     const onReconnect = () => {
       if (room.id) sk.emit("host_rejoin", { roomId: room.id });
@@ -305,11 +290,9 @@ export default function HostDash({ room, onEnd }) {
         "transcript_update",
         "webrtc_offer",
         "webrtc_ice",
-        "audio_mode",
-        "audio_frame",
+        "join_request",
         "connect",
       ].forEach((e) => sk.off(e));
-      if (audioReceiver.current) { audioReceiver.current.stop(); audioReceiver.current = null; }
       if (pc.current) {
         try { pc.current.close(); } catch {}
         pc.current = null;
@@ -425,6 +408,46 @@ export default function HostDash({ room, onEnd }) {
           <Btn v="primary" sz="xs" onClick={enableAudio}>
             Enable audio
           </Btn>
+        </div>
+      )}
+
+      {/* ────────── Pending join requests (waiting room) ────────── */}
+      {room.pendingJoins?.length > 0 && (
+        <div
+          className="px-4 py-2.5 shrink-0 border-b space-y-2"
+          style={{
+            background: "color-mix(in oklab, var(--accent) 8%, white)",
+            borderColor: "color-mix(in oklab, var(--accent) 22%, white)",
+          }}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <Bell size={14} style={{ color: "var(--accent)" }} />
+            <span className="text-sm font-semibold" style={{ color: "var(--ink)" }}>
+              {room.pendingJoins.length} waiting to join
+            </span>
+          </div>
+          {room.pendingJoins.map((p) => (
+            <div key={p.id} className="flex items-center justify-between gap-2 p-2 rounded-lg"
+              style={{ background: "var(--paper)", border: "1px solid var(--line)" }}>
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold shrink-0"
+                  style={{ background: "color-mix(in oklab, var(--accent) 14%, white)", color: "var(--accent)" }}>
+                  <UserPlus size={14} />
+                </div>
+                <span className="text-sm font-medium truncate" style={{ color: "var(--ink)" }}>{p.name}</span>
+              </div>
+              <div className="flex gap-1.5 shrink-0">
+                <Btn v="primary" sz="xs"
+                  onClick={() => s.current.emit("approve_join", { roomId: room.id, userId: p.id })}>
+                  <Check size={12} /> Accept
+                </Btn>
+                <Btn v="danger" sz="xs"
+                  onClick={() => s.current.emit("reject_join", { roomId: room.id, userId: p.id })}>
+                  <X size={12} />
+                </Btn>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

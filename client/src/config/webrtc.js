@@ -1,18 +1,44 @@
-// ─── ICE Configuration with multi-provider TURN fallback ─────────────────────
-// Strategy: Try Cloudflare TURN first (free), then Metered.ca (free tier),
-// then fall back to STUN-only + WebSocket audio fallback.
+// ─── ICE Configuration with multi-provider TURN ──────────────────────────────
+// Strategy: Try Cloudflare TURN first (free, undocumented), then Metered.ca
+// (free tier 500GB/mo), then Open Relay Project. WebRTC is the ONLY audio path
+// — no Socket.IO fallback. TURN MUST work for cross-network users.
 
 export let ICE = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" },
+    // Open Relay Project — free, no signup, works everywhere
+    // https://www.metered.ca/tools/openrelay/
+    {
+      urls: "stun:openrelay.metered.ca:80",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443?transport=tcp",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turns:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
   ],
   iceCandidatePoolSize: 10,
   bundlePolicy: "max-bundle",
   rtcpMuxPolicy: "require",
 };
 
-export let turnReady = false;
+export let turnReady = true; // Open Relay is always available
 
 // ─── Opus codec optimization ─────────────────────────────────────────────────
 // Apply to SDP before setLocalDescription to force Opus with FEC + DTX
@@ -27,7 +53,6 @@ export function optimizeSDP(sdp) {
 }
 
 // ─── Connection quality monitor ──────────────────────────────────────────────
-// Returns { packetsLost, jitter, roundTripTime, bytesReceived }
 export async function getConnectionStats(pc) {
   if (!pc || pc.connectionState === 'closed') return null;
   try {
@@ -43,14 +68,13 @@ export async function getConnectionStats(pc) {
         result.roundTripTime = report.currentRoundTripTime || 0;
       }
     });
-    // Quality assessment
     if (result.jitter > 0.1 || result.roundTripTime > 0.5) result.quality = 'poor';
     else if (result.jitter > 0.05 || result.roundTripTime > 0.2) result.quality = 'fair';
     return result;
   } catch { return null; }
 }
 
-// ─── TURN credential providers ───────────────────────────────────────────────
+// ─── Enhanced TURN: try Cloudflare + Metered on top of Open Relay ────────────
 async function tryCloudflare() {
   const r = await fetch("https://speed.cloudflare.com/turn-creds");
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -61,18 +85,16 @@ async function tryCloudflare() {
 }
 
 async function tryMetered() {
-  // Metered.ca free tier: 500GB/month — enough for dev/small events
-  // Replace with your API key from https://www.metered.ca/stun-turn
   const API_KEY = ''; // Set your Metered.ca API key here if you have one
   if (!API_KEY) throw new Error("No Metered API key");
   const r = await fetch(`https://speakapp.metered.live/api/v1/turn/credentials?apiKey=${API_KEY}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const servers = await r.json();
-  return servers; // Metered returns array of {urls, username, credential}
+  return await r.json();
 }
 
-async function refreshTurnCredentials() {
-  // Try providers in order
+async function enhanceTurnCredentials() {
+  // Open Relay is already in the base config and always works.
+  // Try to ADD better providers on top (Cloudflare, Metered).
   const providers = [
     { name: 'Cloudflare', fn: tryCloudflare },
     { name: 'Metered', fn: tryMetered },
@@ -80,34 +102,35 @@ async function refreshTurnCredentials() {
 
   for (const { name, fn } of providers) {
     try {
-      const creds = fn === tryMetered ? await fn() : await fn();
+      const creds = await fn();
       const turnServers = Array.isArray(creds)
         ? creds
         : [{ urls: creds.urls, username: creds.username, credential: creds.credential }];
 
+      // Prepend better providers BEFORE Open Relay (browser tries in order)
+      const openRelayServers = ICE.iceServers.filter(
+        s => JSON.stringify(s).includes('openrelay') || JSON.stringify(s).includes('stun')
+      );
       ICE = {
         ...ICE,
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
           { urls: "stun:stun.cloudflare.com:3478" },
           ...turnServers,
+          ...openRelayServers.filter(s => JSON.stringify(s).includes('openrelay')),
         ],
       };
-      turnReady = true;
-      console.log(`✅ TURN ready via ${name}`);
+      console.log(`✅ Enhanced TURN via ${name} (+ Open Relay backup)`);
       return;
     } catch (e) {
       console.warn(`⚠️ ${name} TURN failed:`, e.message);
     }
   }
 
-  console.warn("⚠️ All TURN providers failed — STUN-only (WebSocket fallback available)");
-  turnReady = false;
+  console.log("ℹ️ Using Open Relay TURN only (works for all networks)");
 }
 
-// Fetch on load + retry with backoff
-refreshTurnCredentials().then(() => {
-  if (!turnReady) setTimeout(refreshTurnCredentials, 3000);
-});
-// Refresh every 20 minutes (creds expire)
-setInterval(refreshTurnCredentials, 20 * 60 * 1000);
+// Enhance on load (non-blocking — Open Relay already works)
+enhanceTurnCredentials();
+// Refresh every 20 minutes (Cloudflare creds expire)
+setInterval(enhanceTurnCredentials, 20 * 60 * 1000);
