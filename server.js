@@ -357,6 +357,7 @@ function roomJSON(r) {
     queue: r.queue.map(q => ({ id: q.id, name: q.name, question: q.question || '', linkedin: q.linkedin || '' })),
     currentSpeaker: r.currentSpeaker ? { id: r.currentSpeaker.id, name: r.currentSpeaker.name, question: r.currentSpeaker.question || '', linkedin: r.currentSpeaker.linkedin || '' } : null,
     attendeeCount: r.attendees.size,
+    pendingJoins: Array.from(r.pendingJoins?.entries() || []).map(([id, p]) => ({ id, name: p.name, linkedin: p.linkedin || '' })),
     transcript: r.transcript.slice(-50)
   };
 }
@@ -380,7 +381,7 @@ const io = new Server(server, {
   transports: ['websocket', 'polling'],
   pingTimeout: 30000,
   pingInterval: 15000,
-  maxHttpBufferSize: 5e6, // 5MB max message (needed for audio frame fallback)
+  maxHttpBufferSize: 1e6, // 1MB max message
   connectionStateRecovery: {
     maxDisconnectionDuration: 2 * 60 * 1000, // 2 min recovery window
     skipMiddlewares: true,
@@ -610,6 +611,7 @@ io.on('connection', (socket) => {
       id: code, name: data?.name || 'Untitled', hostSocketId: socket.id,
       hostName: data?.hostName || 'Host', status: 'active',
       queue: [], currentSpeaker: null, attendees: new Map(), transcript: [],
+      pendingJoins: new Map(), // waiting room: socketId → { name, linkedin, requestedAt }
       speakerSRActive: false, createdAt: Date.now(),
     };
     rooms.set(code, room);
@@ -641,11 +643,11 @@ io.on('connection', (socket) => {
     if (room.status === 'ended') return socket.emit('error', 'This event has ended');
 
     // ── Network isolation: leave any previous room first ──
-    // One socket = one room. Prevents cross-room audio leakage.
     if (socket.roomId && socket.roomId !== room.id) {
       const oldRoom = getRoom(socket.roomId);
       if (oldRoom) {
         oldRoom.attendees.delete(socket.id);
+        oldRoom.pendingJoins?.delete(socket.id);
         oldRoom.queue = oldRoom.queue.filter(q => q.id !== socket.id);
         if (oldRoom.currentSpeaker?.id === socket.id) {
           oldRoom.currentSpeaker = null;
@@ -658,15 +660,58 @@ io.on('connection', (socket) => {
 
     const userName = user?.name || 'Guest';
     const userLinkedin = user?.linkedin || '';
-    room.attendees.set(socket.id, { id: socket.id, name: userName, linkedin: userLinkedin });
-    socket.join(room.id);
+
+    // ── Waiting room: guest goes to pending, host must approve ──
+    room.pendingJoins.set(socket.id, { name: userName, linkedin: userLinkedin, requestedAt: Date.now() });
     socket.roomId = room.id;
     socket.isHost = false;
-    socketMeta.set(socket.id, { roomId: room.id, role: 'attendee', userName, userLinkedin });
+    socketMeta.set(socket.id, { roomId: room.id, role: 'pending', userName, userLinkedin });
 
-    socket.emit('room_data', roomJSON(room));
-    io.to(room.hostSocketId).emit('attendee_joined', { name: userName, count: room.attendees.size });
-    console.log(`👤 ${userName} → ${room.id} (isolated session)`);
+    // Join the socket.io room so they can receive approval/rejection
+    socket.join(room.id);
+
+    // Tell guest they're in the waiting room
+    socket.emit('join_pending', { roomId: room.id, roomName: room.name, hostName: room.hostName });
+
+    // Notify host of join request
+    io.to(room.hostSocketId).emit('join_request', { id: socket.id, name: userName, linkedin: userLinkedin });
+    io.to(room.hostSocketId).emit('room_data', roomJSON(room));
+    console.log(`⏳ ${userName} waiting for approval → ${room.id}`);
+  });
+
+  // ── Host approves a pending join ──
+  socket.on('approve_join', ({ roomId, userId }) => {
+    const room = validateHost(socket, roomId);
+    if (!room) return;
+    const pending = room.pendingJoins.get(userId);
+    if (!pending) return;
+
+    // Move from pending to attendees
+    room.pendingJoins.delete(userId);
+    room.attendees.set(userId, { id: userId, name: pending.name, linkedin: pending.linkedin || '' });
+    socketMeta.set(userId, { roomId: room.id, role: 'attendee', userName: pending.name, userLinkedin: pending.linkedin });
+
+    // Tell guest they're approved — send full room data
+    io.to(userId).emit('join_approved', roomJSON(room));
+    io.to(room.id).emit('room_data', roomJSON(room));
+    console.log(`✅ ${pending.name} approved → ${room.id}`);
+  });
+
+  // ── Host rejects a pending join ──
+  socket.on('reject_join', ({ roomId, userId }) => {
+    const room = validateHost(socket, roomId);
+    if (!room) return;
+    const pending = room.pendingJoins.get(userId);
+    if (!pending) return;
+
+    room.pendingJoins.delete(userId);
+    socketMeta.delete(userId);
+    io.to(userId).emit('join_rejected', { reason: 'Host declined your request' });
+    // Remove from socket.io room
+    const targetSocket = io.sockets.sockets.get(userId);
+    if (targetSocket) { targetSocket.leave(room.id); targetSocket.roomId = null; }
+    io.to(room.hostSocketId).emit('room_data', roomJSON(room));
+    console.log(`❌ ${pending.name} rejected from ${room.id}`);
   });
 
   // Host reconnection — re-claim host seat if socket changed
@@ -852,26 +897,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ─── WebSocket audio fallback (strict: ONLY currentSpeaker → host) ──
-  socket.on('audio_mode', ({ roomId, mode }) => {
-    const room = validateRoomMember(socket, roomId);
-    if (!room) return;
-    // Only current speaker or granted attendee can set audio mode
-    if (room.currentSpeaker?.id === socket.id) {
-      io.to(room.hostSocketId).emit('audio_mode', { mode, from: socket.id });
-      console.log(`📡 Audio mode: ${mode} for speaker in ${roomId}`);
-    }
-  });
-
-  socket.on('audio_frame', ({ roomId, data }) => {
-    // Strict: only current speaker's frames reach host. All others dropped.
-    const room = validateSpeaker(socket, roomId);
-    if (!room) return;
-    // Point-to-point: speaker → host ONLY (never broadcast to room)
-    io.to(room.hostSocketId).volatile.emit('audio_frame', { data });
-    // .volatile = drop if host can't keep up (prevents buffer bloat)
-  });
-
   // WebRTC renegotiation — attendee requests new offer/answer cycle
   socket.on('webrtc_renegotiate', ({ roomId }) => {
     const room = getRoom(roomId);
@@ -967,6 +992,7 @@ io.on('connection', (socket) => {
       // Presenters just leave silently
     } else {
       room.attendees.delete(socket.id);
+      room.pendingJoins?.delete(socket.id);
       room.queue = room.queue.filter(q => q.id !== socket.id);
       if (room.currentSpeaker?.id === socket.id) {
         const speakerName = room.currentSpeaker.name;

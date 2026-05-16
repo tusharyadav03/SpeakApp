@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Mic, Send, Hand, Square, X, LogOut } from "lucide-react";
 import { getSocket, onConnState } from "../config/socket";
-import { ICE, optimizeSDP, turnReady } from "../config/webrtc";
-import { AudioSender } from "../config/audioFallback";
+import { ICE, optimizeSDP } from "../config/webrtc";
 import {
   Btn,
   Card,
@@ -52,14 +51,12 @@ export default function Attendee({ room, user, onExit }) {
   const [handoffCountdown, setHandoffCountdown] = useState(null);
   const [connState, setConnState] = useState("connected");
   const [hostGone, setHostGone] = useState(false);
-  const [audioMode, setAudioMode] = useState(null); // 'webrtc' | 'websocket' | null
+  const [audioMode, setAudioMode] = useState(null); // 'webrtc' | null
   const pc = useRef(null);
   const stream = useRef(null);
   const recognition = useRef(null);
   const iceCandidateBuffer = useRef([]);
   const remoteDescSet = useRef(false);
-  const audioSender = useRef(null);
-  const rtcTimeout = useRef(null);
   const s = useRef(getSocket());
 
   // Track connection state for ConnPill
@@ -154,23 +151,7 @@ export default function Attendee({ room, user, onExit }) {
   const qPos = (room.queue?.findIndex((x) => x.id === myId) ?? -1) + 1;
   const speaking = room.currentSpeaker?.id === myId;
 
-  /* ─── WebSocket audio fallback ─── */
-  const startWSAudio = useCallback(async () => {
-    console.log("🔄 Falling back to WebSocket audio...");
-    // Clean up WebRTC
-    if (pc.current) { try { pc.current.close(); } catch {} pc.current = null; }
-    if (stream.current) { stream.current.getTracks().forEach(t => t.stop()); stream.current = null; }
-
-    const sender = new AudioSender(s.current, room.id);
-    const ok = await sender.start();
-    if (ok) {
-      audioSender.current = sender;
-      setAudioMode('websocket');
-      s.current.emit('audio_mode', { roomId: room.id, mode: 'websocket' });
-    }
-  }, [room.id]);
-
-  /* ─── WebRTC (primary) ─── */
+  /* ─── WebRTC audio (sole audio path — no Socket.IO fallback) ─── */
   const startRTC = useCallback(async () => {
     try {
       // Reset candidate buffer
@@ -261,7 +242,7 @@ export default function Attendee({ room, user, onExit }) {
           iceRestartCount = 0;
           setAudioMode('webrtc');
           // Clear fallback timeout — WebRTC connected
-          if (rtcTimeout.current) { clearTimeout(rtcTimeout.current); rtcTimeout.current = null; }
+
         }
         if (state === "failed") {
           if (iceRestartCount < MAX_ICE_RESTARTS) {
@@ -269,9 +250,7 @@ export default function Attendee({ room, user, onExit }) {
             console.warn(`ICE failed, restart ${iceRestartCount}/${MAX_ICE_RESTARTS}`);
             c.restartIce();
           } else {
-            // WebRTC exhausted → fallback to WebSocket audio
-            console.warn("ICE exhausted → WebSocket audio fallback");
-            startWSAudio();
+            console.warn("ICE exhausted — TURN may be unavailable");
           }
         }
         if (state === "disconnected") {
@@ -292,14 +271,6 @@ export default function Attendee({ room, user, onExit }) {
       await c.setLocalDescription(optimizedOffer);
       s.current.emit("webrtc_offer", { roomId: room.id, offer: optimizedOffer });
 
-      // Auto-fallback timeout: if WebRTC doesn't connect in 10s, go WebSocket
-      rtcTimeout.current = setTimeout(() => {
-        if (pc.current === c && c.iceConnectionState !== 'connected' && c.iceConnectionState !== 'completed') {
-          console.warn("WebRTC connection timeout (10s) → WebSocket fallback");
-          startWSAudio();
-        }
-      }, 10000);
-
       startSR();
     } catch (err) {
       console.error("Microphone/WebRTC error:", err);
@@ -308,17 +279,13 @@ export default function Attendee({ room, user, onExit }) {
       } else if (err.name === "NotFoundError") {
         alert("No microphone found. Please connect a microphone and try again.");
       } else {
-        // Mic works but WebRTC failed — try WebSocket fallback
-        console.warn("WebRTC setup failed, trying WebSocket fallback...");
-        startWSAudio();
+        alert("Audio connection failed. Please check your network and try again.");
       }
     }
-  }, [room.id, startSR, startWSAudio]);
+  }, [room.id, startSR]);
 
   const stopRTC = useCallback(() => {
     stopSR();
-    if (rtcTimeout.current) { clearTimeout(rtcTimeout.current); rtcTimeout.current = null; }
-    if (audioSender.current) { audioSender.current.stop(); audioSender.current = null; }
     if (stream.current) {
       stream.current.getTracks().forEach((t) => t.stop());
       stream.current = null;
@@ -507,7 +474,6 @@ export default function Attendee({ room, user, onExit }) {
           </h2>
           <p className="mb-6 text-sm" style={{ color: "#062a17", opacity: 0.7 }}>
             Your voice is streaming to the room
-            {audioMode === 'websocket' && <span className="block text-xs mt-1 opacity-60">(relay mode — slightly higher latency)</span>}
           </p>
 
           <div className="w-full max-w-[220px] mb-6">
