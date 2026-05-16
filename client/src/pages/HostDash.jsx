@@ -16,7 +16,8 @@ import {
   Link as LinkIcon,
 } from "lucide-react";
 import { getSocket, onConnState } from "../config/socket";
-import { ICE } from "../config/webrtc";
+import { ICE, optimizeSDP } from "../config/webrtc";
+import { AudioReceiver } from "../config/audioFallback";
 import {
   Logo,
   Btn,
@@ -40,12 +41,14 @@ export default function HostDash({ room, onEnd }) {
   const [transcribing, setTranscribing] = useState(false);
   const [speakerSR, setSpeakerSR] = useState(false);
   const [connState, setConnState] = useState("connected");
+  const [audioMode, setAudioMode] = useState(null); // 'webrtc' | 'websocket'
   const audio = useRef(null);
   const remoteStream = useRef(null);
   const pc = useRef(null);
   const recognition = useRef(null);
   const iceCandidateBuffer = useRef([]);
   const remoteDescSet = useRef(false);
+  const audioReceiver = useRef(null);
   const s = useRef(getSocket());
 
   // Track connection state
@@ -246,8 +249,11 @@ export default function HostDash({ room, onEnd }) {
         }
         if (pc.current !== c) return;
         const ans = await c.createAnswer();
-        await c.setLocalDescription(ans);
-        sk.emit("webrtc_answer", { roomId: room.id, answer: ans, to: from });
+        // Optimize SDP: Opus FEC + DTX for resilient audio
+        const optimizedAns = { ...ans, sdp: optimizeSDP(ans.sdp) };
+        await c.setLocalDescription(optimizedAns);
+        setAudioMode('webrtc');
+        sk.emit("webrtc_answer", { roomId: room.id, answer: optimizedAns, to: from });
       } catch (err) {
         console.error("WebRTC error:", err);
       }
@@ -267,6 +273,24 @@ export default function HostDash({ room, onEnd }) {
       }
     });
 
+    // ─── WebSocket audio fallback receiver ───
+    sk.on("audio_mode", ({ mode }) => {
+      if (mode === 'websocket') {
+        console.log("📡 Speaker using WebSocket audio fallback");
+        setAudioMode('websocket');
+        // Close WebRTC if active
+        if (pc.current) { try { pc.current.close(); } catch {} pc.current = null; }
+        // Start audio receiver
+        if (!audioReceiver.current) {
+          audioReceiver.current = new AudioReceiver();
+          audioReceiver.current.start();
+        }
+      }
+    });
+    sk.on("audio_frame", ({ data }) => {
+      if (audioReceiver.current) audioReceiver.current.feed(data);
+    });
+
     // Host reconnection — rejoin room on socket reconnect
     const onReconnect = () => {
       if (room.id) sk.emit("host_rejoin", { roomId: room.id });
@@ -281,8 +305,11 @@ export default function HostDash({ room, onEnd }) {
         "transcript_update",
         "webrtc_offer",
         "webrtc_ice",
+        "audio_mode",
+        "audio_frame",
         "connect",
       ].forEach((e) => sk.off(e));
+      if (audioReceiver.current) { audioReceiver.current.stop(); audioReceiver.current = null; }
       if (pc.current) {
         try { pc.current.close(); } catch {}
         pc.current = null;
