@@ -177,13 +177,25 @@ export default function Attendee({ room, user, onExit }) {
       iceCandidateBuffer.current = [];
       remoteDescSet.current = false;
 
+      // ── Anti-echo mic constraints ──
+      // echoCancellation: browser AEC removes speaker output picked up by mic
+      // noiseSuppression: kills ambient room noise / PA bleed
+      // autoGainControl: prevents mic gain from amplifying echo
+      // googEchoCancellation2 + googAutoGainControl2: Chrome-specific enhanced AEC
       const ms = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: { ideal: true },
           channelCount: 1,
           sampleRate: 48000,
+          // Chrome-specific enhanced echo cancellation
+          googEchoCancellation: { ideal: true },
+          googExperimentalEchoCancellation: { ideal: true },
+          googAutoGainControl: { ideal: true },
+          googNoiseSuppression: { ideal: true },
+          googHighpassFilter: { ideal: true },
+          googExperimentalNoiseSuppression: { ideal: true },
         },
       });
       stream.current = ms;
@@ -193,6 +205,39 @@ export default function Attendee({ room, user, onExit }) {
 
       const c = new RTCPeerConnection(ICE);
       pc.current = c;
+
+      // ── Voice Activity Detection gate ──
+      // Only send audio when user is actually speaking (reduces echo + bandwidth)
+      const audioCtx = new AudioContext();
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      const source = audioCtx.createMediaStreamSource(ms);
+      source.connect(analyser);
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      // Track if voice is active — mute track when silent
+      const audioTrack = ms.getAudioTracks()[0];
+      let silenceFrames = 0;
+      const VAD_THRESHOLD = 15; // amplitude threshold
+      const SILENCE_FRAMES_TO_MUTE = 20; // ~600ms of silence before muting
+      const vadInterval = setInterval(() => {
+        if (!audioTrack || audioTrack.readyState === 'ended') { clearInterval(vadInterval); return; }
+        analyser.getByteFrequencyData(dataArray);
+        const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+        if (avg < VAD_THRESHOLD) {
+          silenceFrames++;
+          if (silenceFrames > SILENCE_FRAMES_TO_MUTE && audioTrack.enabled) {
+            audioTrack.enabled = false; // mute during silence — kills echo tail
+          }
+        } else {
+          silenceFrames = 0;
+          if (!audioTrack.enabled) audioTrack.enabled = true;
+        }
+      }, 30);
+
+      // Store cleanup refs
+      c._vadCleanup = () => { clearInterval(vadInterval); audioCtx.close().catch(() => {}); };
+
       ms.getTracks().forEach((t) => c.addTrack(t, ms));
 
       c.onicecandidate = (e) => {
@@ -279,6 +324,7 @@ export default function Attendee({ room, user, onExit }) {
       stream.current = null;
     }
     if (pc.current) {
+      if (pc.current._vadCleanup) pc.current._vadCleanup(); // clean up VAD
       pc.current.close();
       pc.current = null;
     }

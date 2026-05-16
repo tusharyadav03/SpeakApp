@@ -4,9 +4,15 @@
 //
 // Flow: getUserMedia → AudioWorklet/ScriptProcessor → PCM → Socket.IO → Host
 // Host: Socket.IO → AudioContext → speakers
+//
+// ECHO PREVENTION:
+// - Sender: VAD gate + enhanced echo cancellation constraints
+// - Processor: Connected to silent gain node (NOT ctx.destination) to prevent feedback
+// - Receiver: No mic capture — playback only
 
 const SAMPLE_RATE = 16000; // 16kHz mono — speech quality, low bandwidth
 const FRAME_SIZE = 4096;   // ~256ms per frame at 16kHz
+const VAD_THRESHOLD = 0.01; // Float32 amplitude — below this = silence
 
 // ─── Sender (Attendee) ──────────────────────────────────────────────────────
 export class AudioSender {
@@ -21,21 +27,41 @@ export class AudioSender {
 
   async start() {
     try {
+      // Enhanced echo cancellation constraints
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: SAMPLE_RATE },
+        audio: {
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: { ideal: true },
+          channelCount: 1,
+          sampleRate: SAMPLE_RATE,
+          // Chrome-specific enhanced AEC
+          googEchoCancellation: { ideal: true },
+          googExperimentalEchoCancellation: { ideal: true },
+          googAutoGainControl: { ideal: true },
+          googNoiseSuppression: { ideal: true },
+          googHighpassFilter: { ideal: true },
+        },
       });
 
       this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
       const source = this.ctx.createMediaStreamSource(this.stream);
 
-      // Use ScriptProcessorNode (deprecated but universal)
-      // AudioWorklet would be better but needs separate file + HTTPS
       this.processor = this.ctx.createScriptProcessor(FRAME_SIZE, 1, 1);
       this.active = true;
 
       this.processor.onaudioprocess = (e) => {
         if (!this.active) return;
         const pcm = e.inputBuffer.getChannelData(0);
+
+        // ── VAD gate: skip silent frames (kills echo tail + saves bandwidth) ──
+        let maxAmp = 0;
+        for (let i = 0; i < pcm.length; i += 16) { // sample every 16th for speed
+          const abs = Math.abs(pcm[i]);
+          if (abs > maxAmp) maxAmp = abs;
+        }
+        if (maxAmp < VAD_THRESHOLD) return; // silence — don't send
+
         // Convert Float32 → Int16 for bandwidth (halves size)
         const int16 = new Int16Array(pcm.length);
         for (let i = 0; i < pcm.length; i++) {
@@ -46,8 +72,16 @@ export class AudioSender {
       };
 
       source.connect(this.processor);
-      this.processor.connect(this.ctx.destination); // required for onaudioprocess to fire
-      console.log('🎙️ WebSocket audio fallback started');
+      // ── ECHO FIX: Connect to a silent gain node instead of ctx.destination ──
+      // ScriptProcessor requires an output connection to fire onaudioprocess,
+      // but connecting to ctx.destination plays the mic audio back through speakers = echo.
+      // Silent gain node = processor fires but no audio output.
+      const silentGain = this.ctx.createGain();
+      silentGain.gain.value = 0;
+      silentGain.connect(this.ctx.destination);
+      this.processor.connect(silentGain);
+
+      console.log('🎙️ WebSocket audio fallback started (echo-free)');
       return true;
     } catch (err) {
       console.error('AudioSender start failed:', err);
